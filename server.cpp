@@ -1,133 +1,125 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stdio.h>
-#include <string.h>
+#include <string>
+#include <thread>
+#include <windows.h>
 
 #include "LogError.h"
+#include "ClientToSrvrMsgBuf.h"
+
+namespace
+{
+     SOCKET srvrRunningSkt{};
+}
+
+void SrvrRunning()
+{
+     int dummy;
+     SOCKADDR_IN clientAddr;
+     int clientAddrSize = sizeof(clientAddr);
+     while (true)
+     {
+          int len = recvfrom(srvrRunningSkt, (char *)&dummy, sizeof(int), 0,
+                             (SOCKADDR *)&clientAddr, &clientAddrSize);
+
+          if (len > 0)
+          {
+               sendto(srvrRunningSkt, (char *)&dummy, sizeof(int), 0,
+                      (SOCKADDR *)&clientAddr, sizeof(clientAddr));
+          }
+     }
+}
 
 int main()
 {
      WSADATA wsaData;
-     SOCKET ReceivingSocket;
-     SOCKADDR_IN ReceiverAddr;
-     int Port = 8888;
-     char ReceiveBuf[1024];
-     int BufLength = 1024;
-     SOCKADDR_IN SenderAddr;
-     int SenderAddrSize = sizeof(SenderAddr);
-     int BytesReceived{};
-
-     // Initialize Winsock version 2.2
      if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
      {
           printf("Server: WSAStartup failed with error: %ld\n", WSAGetLastError());
+          WSACleanup();
 
           return -1;
      }
-     else
+
+     SOCKET srvrSkt = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+     srvrRunningSkt = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+     if (srvrSkt == INVALID_SOCKET || srvrRunningSkt == INVALID_SOCKET)
      {
-          printf("Server: The Winsock DLL status is: %s.\n", wsaData.szSystemStatus);
-     }
-
-     // Create a new socket to receive datagrams on.
-
-     ReceivingSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-
-     if (ReceivingSocket == INVALID_SOCKET)
-     {
-
-          // Print error message
           printf("Server: Error at socket(): %ld\n", WSAGetLastError());
-
-          // Clean up
           WSACleanup();
 
-          // Exit with error
           return -1;
      }
-     else
-     {
-          printf("Server: socket() is OK!\n");
-     }
 
-     /*Set up a SOCKADDR_IN structure that will tell bind that
-     we want to receive datagrams from all interfaces using port 5150.*/
+     SOCKADDR_IN srvrAddr{AF_INET, htons(ErrorLogger::srvrPort), htonl(INADDR_ANY)};
+     SOCKADDR_IN srvrRunningAddr{AF_INET, htons(ErrorLogger::srvrRunningPort), htonl(INADDR_ANY)};
 
-     // The IPv4 family
-     ReceiverAddr.sin_family = AF_INET;
-
-     // Port no. (8888)
-     ReceiverAddr.sin_port = htons(Port);
-
-     // From all interface (0.0.0.0)
-     ReceiverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-     // Associate the address information with the socket using bind.
-     // At this point you can receive datagrams on your bound socket.
-     if (bind(ReceivingSocket, (SOCKADDR *)&ReceiverAddr, sizeof(ReceiverAddr)) == SOCKET_ERROR)
+     if (bind(srvrSkt, (SOCKADDR *)&srvrAddr, sizeof(srvrAddr)) == SOCKET_ERROR)
      {
 
-          // Print error message
-          printf("Server: Error! bind() failed!\n");
-
-          // Close the socket
-          closesocket(ReceivingSocket);
-
-          // Do the clean up
+          printf("srvrSkt: Error! bind() failed!\n");
+          closesocket(srvrSkt);
           WSACleanup();
 
-          // and exit with error
           return -1;
      }
-     else
+
+     if (bind(srvrRunningSkt, (SOCKADDR *)&srvrRunningAddr, sizeof(srvrRunningAddr)) == SOCKET_ERROR)
      {
-          printf("Server: bind() is OK!\n");
+
+          printf("srvrRunningSkt: Error! bind() failed!\n");
+          closesocket(srvrSkt);
+          WSACleanup();
+
+          return -1;
      }
 
-     printf("Server: Receiving IP(s) used: %s\n", inet_ntoa(ReceiverAddr.sin_addr));
-     printf("Server: Receiving port used: %d\n", htons(ReceiverAddr.sin_port));
-     printf("Server: I\'m ready to receive data packages. Waiting...\n\n");
+     std::thread srvrRunning(SrvrRunning);
 
-     // At this point you can receive datagrams on your bound socket.
+     printf("Server: Receiving IP(s) used: %s\n", inet_ntoa(srvrAddr.sin_addr));
+     printf("Server:Waiting on port: %d...\n", srvrAddr.sin_port);
+
      while (true)
      {
-          struct pollfd pfd{.fd = ReceivingSocket, .events = POLLIN};
-          if (WSAPoll(&pfd, 1UL, 1000) <= 0)
+          ErrorLogger::ClientToSrvrMsgBuf clientMsgBuf;
+          SOCKADDR_IN clientAddr;
+          int clientAddrSize = sizeof(clientAddr);
+          int len = recvfrom(srvrSkt, (char *)&clientMsgBuf, sizeof(clientMsgBuf), 0,
+                              (SOCKADDR *)&clientAddr, &clientAddrSize);
+
+          if (len > 0)
           {
-               ErrorLogger::PopupError("This is a test", "Error");
-               continue;
-          }
+               auto msg = std::string(clientMsgBuf.errMsg.data()) + std::string(clientMsgBuf.instructions.data());
+               auto result = MessageBoxA(NULL, msg.data(), clientMsgBuf.caption.data(), MB_ICONERROR | MB_ABORTRETRYIGNORE | MB_DEFBUTTON3);
 
-          // Server is receiving data until you will close it.(You can replace while(1) with a condition to stop receiving.)
-          BytesReceived = recvfrom(ReceivingSocket, ReceiveBuf, BufLength, 0, (SOCKADDR *)&SenderAddr, &SenderAddrSize);
+               ErrorLogger::SrvrResponse srvrResp;
 
-          if (BytesReceived == 0)
-          { // If there are data
-               // Print information for received data
-               printf("Server: Total Bytes received: %d\n", BytesReceived);
-               printf("Server: The data is: %s\n", ReceiveBuf);
-               printf("\n");
-          }
-          else if (BytesReceived < 0)
-          { // If the buffer is empty
-               // Print error message
-               printf("Server: Connection closed with error code: %ld\n", WSAGetLastError());
-          }
-          else
-          { // If error
-               // Print error message
-               printf("Server: recvfrom() failed with error code: %d\n", WSAGetLastError());
+               switch (result)
+               {
+               case IDABORT:
+                    srvrResp = ErrorLogger::SrvrResponse::TerminateProcess;
+               case IDRETRY:
+                    srvrResp = ErrorLogger::SrvrResponse::DisablePopups;
+                    break;
+               case IDIGNORE:
+               default:
+                    srvrResp = ErrorLogger::SrvrResponse::Ignore;
+                    break;
+               }
+
+               sendto(srvrSkt, (char *)&srvrResp, sizeof(int), 0,
+                      (SOCKADDR *)&clientAddr, sizeof(clientAddr));
+
+               printf("Server: Sending IP used: %s\n", inet_ntoa(clientAddr.sin_addr));
+               printf("Server: Sending port used: %d\n", htons(clientAddr.sin_port));
           }
      }
-
-     // Print some info on the sender(Client) side...
-     getpeername(ReceivingSocket, (SOCKADDR *)&SenderAddr, &SenderAddrSize);
-     printf("Server: Sending IP used: %s\n", inet_ntoa(SenderAddr.sin_addr));
-     printf("Server: Sending port used: %d\n", htons(SenderAddr.sin_port));
 
      // When your application is finished receiving datagrams close the socket.
      printf("Server: Finished receiving. Closing the listening socket...\n");
-     if (closesocket(ReceivingSocket) != 0)
+     if (closesocket(srvrSkt) != 0)
      {
           printf("Server: closesocket() failed! Error code: %ld\n", WSAGetLastError());
      }
